@@ -462,7 +462,7 @@ export function renderPrismaticCollision(ctx, w, h, t, bands) {
   _qPhase     += 0.48 + bands.overall * 1.90;   // colour cycling
 
   // ── Draw layers (back → front) ────────────────────────────────────────────
-  drawFoam(ctx, bands, w, h);               // 0. quantum vacuum noise
+  //drawFoam(ctx, bands, w, h);               // 0. quantum vacuum noise
   //drawBeams(ctx, bands, t, w, h);           // 1. spectral emission beams
   BAND_KEYS.forEach((key, n) => {           // 2. QHO spectral rings ×7
    drawQuantumRing(ctx, n, bands[key], t, w, h);
@@ -472,11 +472,11 @@ export function renderPrismaticCollision(ctx, w, h, t, bands) {
   drawStar(ctx, bands, t);                  // 5. atom: nucleus + 3 orbitals
 
   // ── Particle spawning — boosted near beat onset (φ < 0.15) ───────────────
-  // const nearBeat = Math.max(1, 3 * Math.max(0, 1 - _beatPhase * 7));
-  // BAND_KEYS.forEach((key, n) => {
-  //   const e = bands[key];
-  //   if (e > 0.07 && Math.random() < e * 0.38 * nearBeat) spawnParticle(n, e);
-  // });
+  const nearBeat = Math.max(1, 3 * Math.max(0, 1 - _beatPhase * 7));
+  BAND_KEYS.forEach((key, n) => {
+    const e = bands[key];
+    if (e > 0.07 && Math.random() < e * 0.38 * nearBeat) spawnParticle(n, e);
+  });
 
   // ── Beat-sync screen pulse (full-screen glint on strong beats) ───────────
   if (isBeat && beatPulse > 0.09) {
