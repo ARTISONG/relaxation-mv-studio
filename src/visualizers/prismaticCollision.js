@@ -464,9 +464,9 @@ export function renderPrismaticCollision(ctx, w, h, t, bands) {
   // ── Draw layers (back → front) ────────────────────────────────────────────
   drawFoam(ctx, bands, w, h);               // 0. quantum vacuum noise
   //drawBeams(ctx, bands, t, w, h);           // 1. spectral emission beams
-  BAND_KEYS.forEach((key, n) => {           // 2. QHO spectral rings ×7
-    drawQuantumRing(ctx, n, bands[key], t, w, h);
-  });
+  //BAND_KEYS.forEach((key, n) => {           // 2. QHO spectral rings ×7
+  //  drawQuantumRing(ctx, n, bands[key], t, w, h);
+  //});
   drawBeatRipples(ctx);                     // 3. beat shockwave ripples
   drawParticles(ctx);                       // 4. Lissajous photon particles
   drawStar(ctx, bands, t);                  // 5. atom: nucleus + 3 orbitals
