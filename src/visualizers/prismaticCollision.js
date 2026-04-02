@@ -462,7 +462,7 @@ export function renderPrismaticCollision(ctx, w, h, t, bands) {
   _qPhase     += 0.48 + bands.overall * 1.90;   // colour cycling
 
   // ── Draw layers (back → front) ────────────────────────────────────────────
-  //drawFoam(ctx, bands, w, h);               // 0. quantum vacuum noise
+  drawFoam(ctx, bands, w, h);               // 0. quantum vacuum noise
   //drawBeams(ctx, bands, t, w, h);           // 1. spectral emission beams
   // BAND_KEYS.forEach((key, n) => {           // 2. QHO spectral rings ×7
   //  drawQuantumRing(ctx, n, bands[key], t, w, h);
