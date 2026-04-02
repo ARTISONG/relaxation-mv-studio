@@ -468,8 +468,8 @@ export function renderPrismaticCollision(ctx, w, h, t, bands) {
    drawQuantumRing(ctx, n, bands[key], t, w, h);
   });
   //drawBeatRipples(ctx);                     // 3. beat shockwave ripples
-  drawParticles(ctx);                       // 4. Lissajous photon particles
-  drawStar(ctx, bands, t);                  // 5. atom: nucleus + 3 orbitals
+  //drawParticles(ctx);                       // 4. Lissajous photon particles
+  //drawStar(ctx, bands, t);                  // 5. atom: nucleus + 3 orbitals
 
   // ── Particle spawning — boosted near beat onset (φ < 0.15) ───────────────
   const nearBeat = Math.max(1, 3 * Math.max(0, 1 - _beatPhase * 7));
