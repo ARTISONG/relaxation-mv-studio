@@ -467,7 +467,7 @@ export function renderPrismaticCollision(ctx, w, h, t, bands) {
   // BAND_KEYS.forEach((key, n) => {           // 2. QHO spectral rings ×7
   //  drawQuantumRing(ctx, n, bands[key], t, w, h);
   // });
-  // drawBeatRipples(ctx);                     // 3. beat shockwave ripples
+  drawBeatRipples(ctx);                     // 3. beat shockwave ripples
   drawParticles(ctx);                       // 4. Lissajous photon particles
   //drawStar(ctx, bands, t);                  // 5. atom: nucleus + 3 orbitals
 
