@@ -37,6 +37,9 @@ const MOTIONS = [
   { id:"ring_spectrum", name:"Ring Spectrum", nameTh:"ฉัพพรรณรังสี", icon:"◎",
     desc:"วงแหวน 6 ชั้นตามพุทธรังสี — นีล ปีต โลหิต โอทาต มัญเชฐ ประภัสสร — แผ่รัศมีเหมือน Sun Ray ขยาย-หดตาม beat ปรับมืด-สว่างตาม dB",
     research:"ฉัพพรรณรังสี · Gestalt Proximity · Circular Audio Viz", palette:[[5,5,20],[80,140,220],[160,200,255]], trail:false },
+  { id:"prismatic_collision", name:"Prismatic Collision", nameTh:"การชนของดวงดาวผลึกแสง", icon:"✦",
+    desc:"ดาว 2 ดวงโคจรดึงดูดกันด้วยแรงโน้มถ่วง — Bass กระตุ้นให้ชนกัน เกิดระเบิดแสงประภัสสรเหมือนผลึกแก้ว — คำนวณด้วย Elastic Collision + Thin-Film Interference + N-Body Gravity",
+    research:"2-Body Gravitational Problem · Impulse-Based Collision · Chromatic Dispersion", palette:[[0,0,8],[30,80,180],[255,200,80]], trail:false },
 ];
 
 /* ═══════════════════════════════════════════════════════════
