@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { analyzeBands } from "./utils/audio.js";
+import { detectBPM, createMixer, currentTrack } from "./utils/mixer.js";
 import { RENDER_MAP, TRAIL_MODES, resetState } from "./visualizers/index.js";
 import { renderSongTitle } from "./visualizers/songTitle.js";
 
@@ -77,7 +78,10 @@ const Btn=({children,primary,disabled,onClick,sx})=>(
    ═══════════════════════════════════════════════════════════ */
 export default function App() {
   const [motion, setMotion] = useState(null);
-  const [audioFile, setAudioFile] = useState(null);
+  const [tracks, setTracks] = useState([]); // [{name,buffer,bpm,title}]
+  const [crossfadeSec, setCrossfadeSec] = useState(10);
+  const [decoding, setDecoding] = useState(false);
+  const [titleMode, setTitleMode] = useState("dynamic"); // "dynamic" | "fixed"
   const [audioName, setAudioName] = useState("");
   const [songTitle, setSongTitle] = useState("");
   const [songTitle2, setSongTitle2] = useState("");
@@ -100,8 +104,11 @@ export default function App() {
   const canvasRef = useRef(null);
   const animRef = useRef(null);
   const audioCtxRef = useRef(null);
-  const sourceRef = useRef(null);
-  const audioBufferRef = useRef(null);
+  const sourceRef = useRef(null);   // legacy single source (unused now)
+  const mixerRef = useRef(null);      // active mixer instance
+  const liveAnalyserRef = useRef(null); // current analyser (updated per cycle)
+  const cycleTimerRef = useRef(null); // setTimeout id for next cycle scheduling
+  const tracksRef = useRef([]);     // mirror of tracks state for async access
   const fileRef = useRef(null);
   const startTRef = useRef(0);
   const exportTimerRef = useRef(null);
@@ -109,11 +116,24 @@ export default function App() {
 
   const RES = {"720p":[1280,720],"1080p":[1920,1080],"1440p":[2560,1440]};
 
+  // Keep tracksRef in sync
+  useEffect(() => { tracksRef.current = tracks; }, [tracks]);
+
+  // Total playlist duration after crossfade overlaps
+  const totalPlaylistDuration = useCallback(() => {
+    if (!tracks.length) return 0;
+    const sum = tracks.reduce((s, t) => s + (t.buffer ? t.buffer.duration : 0), 0);
+    return Math.max(0, sum - crossfadeSec * (tracks.length - 1));
+  }, [tracks, crossfadeSec]);
+
   // Stop preview/audio only — does NOT touch exporting state
   const stopPreviewOnly = useCallback(() => {
     if (animRef.current) cancelAnimationFrame(animRef.current); animRef.current = null;
     if (exportTimerRef.current) { cancelAnimationFrame(exportTimerRef.current); clearTimeout(exportTimerRef.current); } exportTimerRef.current = null;
+    if (cycleTimerRef.current) { clearTimeout(cycleTimerRef.current); cycleTimerRef.current=null; }
+    if (mixerRef.current) { try{mixerRef.current.stop()}catch(e){} mixerRef.current=null; }
     if (sourceRef.current) { try{sourceRef.current.stop()}catch(e){} sourceRef.current=null; }
+    liveAnalyserRef.current = null;
     setPlaying(false); setBandLevels(null); resetState();
   }, []);
 
@@ -129,37 +149,107 @@ export default function App() {
     const ctx = canvas.getContext("2d");
     const [cw,ch] = RES[resolution]; canvas.width=cw; canvas.height=ch;
     const renderFn = RENDER_MAP[motion]; if (!renderFn) return;
-    let analyser=null, sampleRate=44100;
-    if (audioBufferRef.current) {
+    let sampleRate=44100;
+    const readyTracks = tracks.filter(t => t.buffer);
+
+    // Schedule one playlist cycle with optional explicit start time.
+    // Next cycle is pre-scheduled to start crossfadeSec before this one ends
+    // — gives full beat-match + EQ sweep crossfade across the loop boundary.
+    const scheduleCycle = (startTime) => {
+      const actx = audioCtxRef.current;
+      const m = createMixer(actx, readyTracks, {
+        crossfade: crossfadeSec,
+        startTime, // undefined on first call → uses default (now + 0.15s)
+      });
+      mixerRef.current = m;
+      liveAnalyserRef.current = m.analyser;
+
+      // Fire next cycle exactly crossfadeSec before current cycle ends
+      const nextStartAbs = m.mixStart + m.totalDuration - crossfadeSec;
+      const delayMs = Math.max(0, (nextStartAbs - actx.currentTime) * 1000);
+      cycleTimerRef.current = setTimeout(() => {
+        if (animRef.current) scheduleCycle(nextStartAbs);
+      }, delayMs);
+    };
+
+    if (readyTracks.length) {
       if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
-      const actx = audioCtxRef.current; sampleRate=actx.sampleRate;
-      analyser = actx.createAnalyser(); analyser.fftSize=2048; analyser.smoothingTimeConstant=0.82;
-      const src = actx.createBufferSource(); src.buffer=audioBufferRef.current; src.loop=true;
-      src.connect(analyser); analyser.connect(actx.destination);
-      src.start(0); sourceRef.current=src;
+      const actx = audioCtxRef.current; sampleRate = actx.sampleRate;
+      actx.resume && actx.resume();
+      scheduleCycle(); // first cycle
     }
+
     const useTrail = TRAIL_MODES.has(motion);
     startTRef.current=0; let fc=0;
     const loop = (ts) => {
       if (!startTRef.current) startTRef.current=ts;
       const elapsed = ts-startTRef.current;
+      const analyser = liveAnalyserRef.current;
       const bands = analyzeBands(analyser, sampleRate);
       if (fc%3===0) setBandLevels(bands);
       if (useTrail) { ctx.fillStyle="rgba(0,0,0,0.08)"; ctx.fillRect(0,0,cw,ch); }
       else { ctx.fillStyle="#000"; ctx.fillRect(0,0,cw,ch); }
       renderFn(ctx,cw,ch,elapsed,bands);
-      if (showTitle) renderSongTitle(ctx,cw,ch,songTitle||audioName,songTitle2,bands,elapsed,titlePos,titleFontSize,titleFontSize2);
+      // Title: fixed = always songTitle, dynamic = per-track name
+      let line1 = songTitle || audioName;
+      const activeMixer = mixerRef.current;
+      if (titleMode === "dynamic" && activeMixer) {
+        const playhead = audioCtxRef.current.currentTime - activeMixer.mixStart;
+        const cur = currentTrack(activeMixer.schedule, playhead);
+        if (cur) line1 = cur.name || line1;
+      }
+      if (showTitle) renderSongTitle(ctx,cw,ch,line1,songTitle2,bands,elapsed,titlePos,titleFontSize,titleFontSize2);
       fc++; animRef.current=requestAnimationFrame(loop);
     };
     animRef.current=requestAnimationFrame(loop); setPlaying(true);
-  }, [motion,resolution,audioName,songTitle,songTitle2,showTitle,titlePos,titleFontSize,titleFontSize2,stopAll]);
+  }, [motion,resolution,tracks,crossfadeSec,titleMode,audioName,songTitle,songTitle2,showTitle,titlePos,titleFontSize,titleFontSize2,stopAll]);
 
-  const handleFile = useCallback(async(file) => {
-    if (!file || !file.type.startsWith("audio/")) return;
-    setAudioFile(file); setAudioName(file.name);
-    setSongTitle(file.name.replace(/\.[^/.]+$/,"").replace(/[-_]/g," "));
+  const handleFiles = useCallback(async(fileList) => {
+    const files = Array.from(fileList || []).filter(f =>
+      f && (f.type.startsWith("audio/") || /\.(mp3|wav|flac|ogg|aac|m4a|wma|opus)$/i.test(f.name))
+    );
+    if (!files.length) return;
     if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
-    audioBufferRef.current = await audioCtxRef.current.decodeAudioData(await file.arrayBuffer());
+    setDecoding(true);
+    for (const file of files) {
+      try {
+        const buffer = await audioCtxRef.current.decodeAudioData(await file.arrayBuffer());
+        const cleanName = file.name.replace(/\.[^/.]+$/,"").replace(/[-_]/g," ");
+        // Add immediately with unknown BPM, update once detected
+        const entry = { name: cleanName, buffer, bpm: 0, fileName: file.name };
+        setTracks(prev => {
+          const next = [...prev, entry];
+          if (next.length === 1) {
+            setAudioName(file.name);
+            setSongTitle(cleanName);
+          }
+          return next;
+        });
+        // BPM detection in background
+        detectBPM(buffer).then(bpm => {
+          setTracks(prev => prev.map(t => t === entry ? { ...t, bpm } : t));
+        });
+      } catch (e) {
+        console.error("Decode failed", file.name, e);
+      }
+    }
+    setDecoding(false);
+  },[]);
+
+  const removeTrack = useCallback((idx) => {
+    setTracks(prev => prev.filter((_,i) => i !== idx));
+  },[]);
+  const moveTrack = useCallback((idx, dir) => {
+    setTracks(prev => {
+      const j = idx + dir;
+      if (j < 0 || j >= prev.length) return prev;
+      const next = [...prev];
+      [next[idx], next[j]] = [next[j], next[idx]];
+      return next;
+    });
+  },[]);
+  const updateTrackName = useCallback((idx, val) => {
+    setTracks(prev => prev.map((t,i) => i===idx ? {...t, name: val} : t));
   },[]);
 
   const handleLogoFile = useCallback((file) => {
@@ -273,26 +363,40 @@ export default function App() {
     const [cw,ch]=RES[resolution]; const off=document.createElement("canvas");
     off.width=cw; off.height=ch; const octx=off.getContext("2d");
     const renderFn=RENDER_MAP[motion];
-    const dur = audioBufferRef.current?audioBufferRef.current.duration:60;
-    const totalDur=dur*loops; const stream=off.captureStream(30);
+    const readyTracks = tracks.filter(t => t.buffer);
+    const singleLen = readyTracks.length
+      ? readyTracks.reduce((s,t)=>s+t.buffer.duration,0) - crossfadeSec*(readyTracks.length-1)
+      : 60;
+    const totalDur = singleLen * loops;
+    const stream=off.captureStream(30);
     let analyser=null,sampleRate=44100;
     let hasAudio = false;
     let exportGain = null;
-    if (audioBufferRef.current) {
+    let mixer = null;
+    if (readyTracks.length) {
       if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
       const actx=audioCtxRef.current;
       await actx.resume();
       sampleRate=actx.sampleRate;
-      analyser=actx.createAnalyser(); analyser.fftSize=2048; analyser.smoothingTimeConstant=0.82;
       exportGain=actx.createGain(); exportGain.gain.value=1;
       const dest=actx.createMediaStreamDestination();
-      const src=actx.createBufferSource(); src.buffer=audioBufferRef.current; src.loop=true;
-      src.connect(analyser); analyser.connect(exportGain);
-      exportGain.connect(dest); exportGain.connect(actx.destination);
-      src.start(0); sourceRef.current=src;
+      // Note: loops > 1 means playlist repeats — we build a mixer with the playlist
+      // repeated `loops` times (each loop also crossfades into the next loop).
+      const repeated = [];
+      for (let r=0; r<loops; r++) repeated.push(...readyTracks);
+      mixer = createMixer(actx, repeated, {
+        crossfade: crossfadeSec,
+        connectDestination: false,
+        destinations: [exportGain],
+      });
+      mixerRef.current = mixer;
+      analyser = mixer.analyser;
+      exportGain.connect(dest);
+      exportGain.connect(actx.destination);
       dest.stream.getAudioTracks().forEach(t=>stream.addTrack(t));
       hasAudio = stream.getAudioTracks().length > 0;
     }
+    const effectiveTotal = mixer ? mixer.totalDuration : totalDur;
     const mimeType = hasAudio ? "video/webm;codecs=vp9,opus" : "video/webm;codecs=vp9";
     rec=new MediaRecorder(stream,{mimeType,videoBitsPerSecond:30000000});
     const chunks=[]; rec.ondataavailable=e=>{if(e.data.size>0)chunks.push(e.data)};
@@ -302,7 +406,7 @@ export default function App() {
     const visCtx=visCanvas?visCanvas.getContext("2d"):null;
     if(visCanvas){visCanvas.width=cw;visCanvas.height=ch;}
     const exportStartTime = Date.now();
-    const totalMs = totalDur * 1000;
+    const totalMs = effectiveTotal * 1000;
     let lastProgUpdate = 0;
     await new Promise((resolveRender)=>{
       const render=()=>{
@@ -317,7 +421,13 @@ export default function App() {
         if(useTrail){octx.fillStyle="rgba(0,0,0,0.08)";octx.fillRect(0,0,cw,ch)}
         else{octx.fillStyle="#000";octx.fillRect(0,0,cw,ch)}
         renderFn(octx,cw,ch,t,bands);
-        if(showTitle)renderSongTitle(octx,cw,ch,songTitle||audioName,songTitle2,bands,t,titlePos,titleFontSize,titleFontSize2);
+        let expLine1 = songTitle || audioName;
+        if (titleMode === "dynamic" && mixer) {
+          const ph = audioCtxRef.current.currentTime - mixer.mixStart;
+          const cur = currentTrack(mixer.schedule, ph);
+          if (cur) expLine1 = cur.name || expLine1;
+        }
+        if(showTitle)renderSongTitle(octx,cw,ch,expLine1,songTitle2,bands,t,titlePos,titleFontSize,titleFontSize2);
         const fadeMs = 15000;
         const remaining = totalMs - elapsed;
         if(remaining < fadeMs){
@@ -363,11 +473,12 @@ export default function App() {
       console.error("Export error:", err);
       if(rec && rec.state==="recording") try{rec.stop();}catch(e){}
       if(sourceRef.current){try{sourceRef.current.stop()}catch(e){}sourceRef.current=null;}
+      if(mixerRef.current){try{mixerRef.current.stop()}catch(e){}mixerRef.current=null;}
     } finally {
       setExporting(false);
       exportTimerRef.current = null;
     }
-  },[motion,loops,resolution,audioName,songTitle,songTitle2,showTitle,titlePos,titleFontSize,titleFontSize2,endLogo,stopPreviewOnly]);
+  },[motion,loops,resolution,tracks,crossfadeSec,titleMode,audioName,songTitle,songTitle2,showTitle,titlePos,titleFontSize,titleFontSize2,endLogo,stopPreviewOnly]);
 
   useEffect(()=>()=>stopAll(),[stopAll]);
 
@@ -446,42 +557,101 @@ export default function App() {
         {step===2&&(
           <div style={{maxWidth:580,margin:"0 auto"}}>
             <div onDragOver={e=>{e.preventDefault();setDragOver(true)}} onDragLeave={()=>setDragOver(false)}
-              onDrop={e=>{e.preventDefault();setDragOver(false);e.dataTransfer.files[0]&&handleFile(e.dataTransfer.files[0])}}
+              onDrop={e=>{e.preventDefault();setDragOver(false);handleFiles(e.dataTransfer.files)}}
               onClick={()=>fileRef.current?.click()}
-              style={{border:dragOver?"1px solid "+gold(0.6):audioFile?"1px solid #1E1C18":"1px dashed #1A1814",borderRadius:12,padding:"48px 28px",textAlign:"center",cursor:"pointer",background:dragOver?"rgba(212,175,55,0.03)":"rgba(8,6,4,0.7)",transition:"all 0.4s"}}>
-              <input ref={fileRef} type="file" accept=".mp3,.wav,.flac,.ogg,.aac,.m4a,.wma,.opus,audio/mpeg,audio/wav,audio/flac,audio/ogg,audio/aac,audio/mp4,audio/*" style={{display:"none"}} onChange={e=>e.target.files[0]&&handleFile(e.target.files[0])}/>
-              {audioFile?(
-                <div>
-                  <div style={{fontSize:28,color:gold(0.6),marginBottom:10}}>♪</div>
-                  <div style={{fontSize:17,color:"#F0EDE8"}}>{audioName}</div>
-                  <div style={{fontSize:17,color:"#9A948C",fontFamily:"'Sarabun'",marginTop:4}}>
-                    {audioBufferRef.current?`${Math.floor(audioBufferRef.current.duration/60)}:${String(Math.floor(audioBufferRef.current.duration%60)).padStart(2,"0")} · ${audioBufferRef.current.numberOfChannels}ch · ${audioBufferRef.current.sampleRate/1000}kHz`:"decoding..."}
+              style={{border:dragOver?"1px solid "+gold(0.6):tracks.length?"1px solid #1E1C18":"1px dashed #1A1814",borderRadius:12,padding:tracks.length?"24px 22px":"48px 28px",textAlign:"center",cursor:"pointer",background:dragOver?"rgba(212,175,55,0.03)":"rgba(8,6,4,0.7)",transition:"all 0.4s"}}>
+              <input ref={fileRef} type="file" multiple accept=".mp3,.wav,.flac,.ogg,.aac,.m4a,.wma,.opus,audio/mpeg,audio/wav,audio/flac,audio/ogg,audio/aac,audio/mp4,audio/*" style={{display:"none"}} onChange={e=>{handleFiles(e.target.files); e.target.value="";}}/>
+              <div style={{fontSize:28,color:gold(0.6),marginBottom:6}}>♪</div>
+              <div style={{fontSize:16,color:"#9A948C"}}>{tracks.length?`+ เพิ่มเพลง (เลือกได้หลายไฟล์)`:`ลากไฟล์เพลงมาวางที่นี่ (เลือกได้หลายไฟล์)`}</div>
+              <div style={{fontSize:14,color:"#7A746C",fontFamily:"'Sarabun'",marginTop:6}}>MP3 · WAV · FLAC · OGG · AAC {decoding?" · decoding...":""}</div>
+            </div>
+
+            {tracks.length>0 && (
+              <div style={{marginTop:16,background:"rgba(8,6,4,0.6)",border:"1px solid #1A1814",borderRadius:10,padding:12}}>
+                <div style={{fontSize:13,color:gold(0.5),fontFamily:"'Sarabun'",fontWeight:300,marginBottom:10,letterSpacing:1,textTransform:"uppercase"}}>Playlist ({tracks.length} tracks · ≈ {Math.floor(totalPlaylistDuration()/60)}:{String(Math.floor(totalPlaylistDuration()%60)).padStart(2,"0")})</div>
+                {tracks.map((t,i)=>(
+                  <div key={i} style={{padding:"10px 6px",borderBottom:i<tracks.length-1?"1px solid #14120F":"none"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <div style={{fontSize:13,color:gold(0.5),width:22,textAlign:"center",fontFamily:"'Sarabun'",flexShrink:0}}>{i+1}</div>
+                      <input
+                        value={t.name}
+                        onChange={e=>updateTrackName(i, e.target.value)}
+                        onClick={e=>e.stopPropagation()}
+                        style={{flex:1,minWidth:0,background:"transparent",border:"none",borderBottom:"1px solid #1A1814",color:"#F0EDE8",fontSize:15,fontFamily:"'Sarabun'",fontWeight:400,outline:"none",padding:"2px 4px"}}
+                        onFocus={e=>{e.stopPropagation();e.target.style.borderBottomColor=gold(0.4)}}
+                        onBlur={e=>e.target.style.borderBottomColor="#1A1814"}
+                      />
+                      <button onClick={(e)=>{e.stopPropagation();moveTrack(i,-1)}} disabled={i===0} style={{background:"none",border:"none",color:i===0?"#3A342A":gold(0.6),cursor:i===0?"default":"pointer",fontSize:14,padding:"2px 5px"}}>▲</button>
+                      <button onClick={(e)=>{e.stopPropagation();moveTrack(i,1)}} disabled={i===tracks.length-1} style={{background:"none",border:"none",color:i===tracks.length-1?"#3A342A":gold(0.6),cursor:i===tracks.length-1?"default":"pointer",fontSize:14,padding:"2px 5px"}}>▼</button>
+                      <button onClick={(e)=>{e.stopPropagation();removeTrack(i)}} style={{background:"none",border:"none",color:"#8A5A5A",cursor:"pointer",fontSize:14,padding:"2px 6px"}}>✕</button>
+                    </div>
+                    <div style={{fontSize:11,color:"#7A746C",fontFamily:"'Sarabun'",marginTop:4,paddingLeft:30}}>
+                      {Math.floor(t.buffer.duration/60)}:{String(Math.floor(t.buffer.duration%60)).padStart(2,"0")}
+                      {" · "}{t.buffer.numberOfChannels}ch · {Math.round(t.buffer.sampleRate/1000)}kHz
+                      {t.bpm?` · ${t.bpm} BPM`:" · BPM …"}
+                    </div>
                   </div>
-                  <div style={{fontSize:17,color:gold(0.4),fontFamily:"'Sarabun'",fontWeight:200,marginTop:10}}>คลิกเพื่อเปลี่ยนไฟล์</div>
+                ))}
+                {tracks.length>1 && (
+                  <div style={{marginTop:12,paddingTop:12,borderTop:"1px solid #14120F"}}>
+                    <label style={{fontSize:13,color:"#9A948C",fontFamily:"'Sarabun'",fontWeight:200,display:"block",marginBottom:6}}>
+                      Crossfade ({crossfadeSec}s) · beat-match + EQ sweep
+                    </label>
+                    <input type="range" min={2} max={20} step={1} value={crossfadeSec}
+                      onChange={e=>setCrossfadeSec(Number(e.target.value))}
+                      style={{width:"100%",accentColor:"#D4AF37",cursor:"pointer"}}/>
+                    <div style={{fontSize:11,color:"#6A6050",fontFamily:"'Sarabun'",marginTop:4}}>
+                      เพลงจะถูกผสานกันด้วย equal-power crossfade, lowpass filter sweep และ tempo-sync (±14%)
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            <div style={{marginTop:24}}>
+              {/* ── Title Mode Toggle ── */}
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <div onClick={()=>setShowTitle(!showTitle)} style={{width:18,height:18,borderRadius:3,border:"1px solid "+(showTitle?gold(0.5):"#1E1C18"),display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",background:showTitle?"rgba(212,175,55,0.1)":"transparent",fontSize:13,color:gold(0.7)}}>{showTitle?"✓":""}</div>
+                  <span style={{fontSize:14,color:"#9A948C",fontFamily:"'Sarabun'",fontWeight:200}}>แสดงชื่อเพลงบนวิดีโอ</span>
                 </div>
-              ):(
-                <div>
-                  <div style={{fontSize:36,color:"#5A5448",marginBottom:14}}>◈</div>
-                  <div style={{fontSize:16,color:"#9A948C"}}>ลากไฟล์เพลงมาวางที่นี่</div>
-                  <div style={{fontSize:17,color:"#7A746C",fontFamily:"'Sarabun'",marginTop:6}}>MP3 · WAV · FLAC · OGG · AAC</div>
+                {showTitle && (
+                  <div style={{display:"flex",gap:4}}>
+                    {[["dynamic","Dynamic"],["fixed","Fixed"]].map(([mode,label])=>(
+                      <button key={mode} onClick={()=>setTitleMode(mode)} style={{
+                        padding:"5px 14px",borderRadius:6,fontSize:13,fontFamily:"'Sarabun'",cursor:"pointer",
+                        border:titleMode===mode?"1px solid "+gold(0.5):"1px solid #1E1C18",
+                        background:titleMode===mode?"rgba(212,175,55,0.08)":"rgba(8,6,4,0.8)",
+                        color:titleMode===mode?gold(0.8):"#5A5448",transition:"all 0.2s",
+                      }}>{label}</button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {showTitle && titleMode==="dynamic" && (
+                <div style={{background:"rgba(212,175,55,0.03)",border:"1px solid #1A1814",borderRadius:8,padding:"12px 14px",marginBottom:12}}>
+                  <div style={{fontSize:13,color:gold(0.5),fontFamily:"'Sarabun'",fontWeight:300,marginBottom:6}}>
+                    บรรทัดที่ 1 — ใช้ชื่อเพลงจาก playlist อัตโนมัติ (แก้ไขชื่อได้ในรายการด้านบน)
+                  </div>
+                  <label style={{fontSize:13,color:"#9A948C",fontFamily:"'Sarabun'",fontWeight:200,display:"block",marginBottom:6}}>บรรทัดที่ 2 — ข้อความคงที่ทุกเพลง (ไม่บังคับ)</label>
+                  <input value={songTitle2} onChange={e=>setSongTitle2(e.target.value)} placeholder="ศิลปิน / คำโปรย"
+                    style={{width:"100%",boxSizing:"border-box",background:"rgba(8,6,4,0.8)",border:"1px solid #1A1814",borderRadius:8,padding:"10px 14px",color:"#F0EDE8",fontSize:15,fontFamily:"'Sarabun'",fontWeight:400,outline:"none",letterSpacing:0.5}}
+                    onFocus={e=>e.target.style.borderColor=gold(0.3)} onBlur={e=>e.target.style.borderColor="#1A1814"}/>
                 </div>
               )}
-            </div>
-            <div style={{marginTop:24}}>
-              <label style={{fontSize:14,color:"#9A948C",fontFamily:"'Sarabun'",fontWeight:200,display:"block",marginBottom:6}}>บรรทัดที่ 1</label>
-              <input value={songTitle} onChange={e=>setSongTitle(e.target.value)} placeholder="ชื่อเพลง"
-                style={{width:"100%",boxSizing:"border-box",background:"rgba(8,6,4,0.8)",border:"1px solid #1A1814",borderRadius:8,padding:"12px 16px",color:"#F0EDE8",fontSize:17,fontFamily:"'Sarabun'",fontWeight:400,outline:"none",letterSpacing:0.5}}
-                onFocus={e=>e.target.style.borderColor=gold(0.3)} onBlur={e=>e.target.style.borderColor="#1A1814"}/>
 
-              <label style={{fontSize:14,color:"#9A948C",fontFamily:"'Sarabun'",fontWeight:200,display:"block",marginBottom:6,marginTop:12}}>บรรทัดที่ 2 (ไม่บังคับ)</label>
-              <input value={songTitle2} onChange={e=>setSongTitle2(e.target.value)} placeholder="ศิลปิน / คำโปรย"
-                style={{width:"100%",boxSizing:"border-box",background:"rgba(8,6,4,0.8)",border:"1px solid #1A1814",borderRadius:8,padding:"12px 16px",color:"#F0EDE8",fontSize:17,fontFamily:"'Sarabun'",fontWeight:400,outline:"none",letterSpacing:0.5}}
-                onFocus={e=>e.target.style.borderColor=gold(0.3)} onBlur={e=>e.target.style.borderColor="#1A1814"}/>
-
-              <div style={{display:"flex",alignItems:"center",gap:8,marginTop:10}}>
-                <div onClick={()=>setShowTitle(!showTitle)} style={{width:18,height:18,borderRadius:3,border:"1px solid "+(showTitle?gold(0.5):"#1E1C18"),display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",background:showTitle?"rgba(212,175,55,0.1)":"transparent",fontSize:13,color:gold(0.7)}}>{showTitle?"✓":""}</div>
-                <span style={{fontSize:14,color:"#9A948C",fontFamily:"'Sarabun'",fontWeight:200}}>แสดงชื่อเพลงบนวิดีโอ</span>
-              </div>
+              {showTitle && titleMode==="fixed" && (
+                <div style={{marginBottom:12}}>
+                  <label style={{fontSize:14,color:"#9A948C",fontFamily:"'Sarabun'",fontWeight:200,display:"block",marginBottom:6}}>บรรทัดที่ 1 — ข้อความคงที่</label>
+                  <input value={songTitle} onChange={e=>setSongTitle(e.target.value)} placeholder="ชื่อเพลง"
+                    style={{width:"100%",boxSizing:"border-box",background:"rgba(8,6,4,0.8)",border:"1px solid #1A1814",borderRadius:8,padding:"12px 16px",color:"#F0EDE8",fontSize:17,fontFamily:"'Sarabun'",fontWeight:400,outline:"none",letterSpacing:0.5}}
+                    onFocus={e=>e.target.style.borderColor=gold(0.3)} onBlur={e=>e.target.style.borderColor="#1A1814"}/>
+                  <label style={{fontSize:14,color:"#9A948C",fontFamily:"'Sarabun'",fontWeight:200,display:"block",marginBottom:6,marginTop:12}}>บรรทัดที่ 2 (ไม่บังคับ)</label>
+                  <input value={songTitle2} onChange={e=>setSongTitle2(e.target.value)} placeholder="ศิลปิน / คำโปรย"
+                    style={{width:"100%",boxSizing:"border-box",background:"rgba(8,6,4,0.8)",border:"1px solid #1A1814",borderRadius:8,padding:"12px 16px",color:"#F0EDE8",fontSize:17,fontFamily:"'Sarabun'",fontWeight:400,outline:"none",letterSpacing:0.5}}
+                    onFocus={e=>e.target.style.borderColor=gold(0.3)} onBlur={e=>e.target.style.borderColor="#1A1814"}/>
+                </div>
+              )}
 
               {showTitle && (
                 <div style={{marginTop:16}}>
@@ -524,7 +694,7 @@ export default function App() {
                   <span style={{fontSize:20,fontWeight:300,color:gold(0.7),minWidth:32,textAlign:"center"}}>{loops}</span>
                   <button onClick={()=>setLoops(Math.min(99,loops+1))} style={{width:32,height:32,borderRadius:6,border:"1px solid #1E1C18",background:"rgba(8,6,4,0.8)",color:gold(0.6),fontSize:16,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>+</button>
                 </div>
-                {audioBufferRef.current&&<div style={{fontSize:16,color:"#8A8478",fontFamily:"'Sarabun'",marginTop:4}}>≈ {Math.floor(audioBufferRef.current.duration*loops/60)} min</div>}
+                {tracks.length>0&&<div style={{fontSize:16,color:"#8A8478",fontFamily:"'Sarabun'",marginTop:4}}>≈ {Math.floor(totalPlaylistDuration()*loops/60)} min</div>}
               </div>
               <div>
                 <label style={{fontSize:17,color:"#9A948C",fontFamily:"'Sarabun'",fontWeight:200,display:"block",marginBottom:6}}>Resolution</label>
@@ -616,7 +786,7 @@ export default function App() {
                 </div>
                 <div style={{textAlign:"center",fontSize:16,color:"#9A948C",fontFamily:"'Sarabun'",fontWeight:200,marginTop:6}}>
                   Export แบบ real-time (เสียง+ภาพ sync) · ใช้เวลาเท่าความยาววิดีโอ
-                  {audioBufferRef.current && <span> · ≈ {Math.ceil(audioBufferRef.current.duration * loops / 60)} นาที</span>}
+                  {tracks.length>0 && <span> · ≈ {Math.ceil(totalPlaylistDuration() * loops / 60)} นาที</span>}
                 </div>
               </div>
             )}
