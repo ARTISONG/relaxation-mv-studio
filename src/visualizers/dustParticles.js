@@ -1,43 +1,67 @@
-// ─── 1. DUST PARTICLES — floating motes in warm light ───
+// ─── 1. DUST PARTICLES — bass breathes them out, vacuum pulls them in ───
 import { simplex } from "../utils/simplex.js";
 import { hsl } from "../utils/audio.js";
 
 let _dustMotes = null;
+let _smoothBass  = 0;   // slow-following bass baseline
+let _beatImpulse = 0;   // energy released on each beat spike — decays fast
 
 function initDust(w, h) {
-  _dustMotes = Array.from({ length: 500 }, (_, i) => ({
-    x: Math.random() * w,
-    y: Math.random() * h,
-    vx: 0, vy: 0,
-    size: 0.5 + Math.random() * 3,
-    hue: 30 + Math.random() * 20,
-    brightness: 0.2 + Math.random() * 0.8,
-    phase: Math.random() * Math.PI * 2,
-    noiseOff: i * 3.7,
-    depth: Math.random(), // 0=far, 1=near — controls parallax & size
-  }));
+  const cx = w / 2, cy = h / 2;
+  _dustMotes = Array.from({ length: 520 }, (_, i) => {
+    const angle  = Math.random() * Math.PI * 2;
+    const radius = (0.05 + Math.random() * 0.55) * Math.min(w, h) * 0.45;
+    return {
+      x: cx + Math.cos(angle) * radius,
+      y: cy + Math.sin(angle) * radius,
+      vx: 0, vy: 0,
+      size:       0.5 + Math.random() * 3.2,
+      hue:        28 + Math.random() * 22,
+      brightness: 0.25 + Math.random() * 0.75,
+      phase:      Math.random() * Math.PI * 2,
+      noiseOff:   i * 3.71,
+      depth:      Math.random(),   // 0=far/dim, 1=near/bright
+    };
+  });
 }
 
 export function resetDust() {
-  _dustMotes = null;
+  _dustMotes   = null;
+  _smoothBass  = 0;
+  _beatImpulse = 0;
 }
 
 export function renderLuminousDrift(ctx, w, h, t, bands) {
   if (!_dustMotes) initDust(w, h);
-  const time = t * 0.001;
-  const bass = bands.bass||0, sub = bands.subBass||0, mid = bands.mid||0;
-  const highMid = bands.highMid||0, pres = bands.presence||0, brill = bands.brilliance||0;
-  const overall = bands.overall||0;
 
-  // Subtle warm light shafts from top
-  for (let shaft = 0; shaft < 3; shaft++) {
-    const sx = w * (0.25 + shaft * 0.25) + Math.sin(time * 0.1 + shaft) * w * 0.05;
-    const shaftAlpha = 0.008 + bass * 0.008;
-    const grad = ctx.createLinearGradient(sx - w * 0.08, 0, sx + w * 0.08, h);
-    grad.addColorStop(0, hsl(38, 40, 50, shaftAlpha * 2));
-    grad.addColorStop(0.3, hsl(38, 30, 40, shaftAlpha));
-    grad.addColorStop(1, "rgba(0,0,0,0)");
-    ctx.fillStyle = grad;
+  const time    = t * 0.001;
+  const bass    = bands.bass      || 0;
+  const mid     = bands.mid       || 0;
+  const pres    = bands.presence  || 0;
+  const brill   = bands.brilliance|| 0;
+  const overall = bands.overall   || 0;
+
+  // ── Bass pulse analysis ──────────────────────────────────────────────────
+  // Smooth baseline (40-frame lag) so sudden spikes stand out clearly
+  _smoothBass  += (bass - _smoothBass)  * 0.055;
+
+  // Beat impulse = amount bass EXCEEDS baseline this frame
+  const spike   = Math.max(0, bass - _smoothBass - 0.04);
+  _beatImpulse += spike * 6;
+  _beatImpulse *= 0.82;   // punchy decay: ~half-life ≈ 3-4 frames (~55 ms)
+
+  // Vacuum state: how quiet is the sustained bass (0 = loud, 1 = silent)
+  const quietness = Math.max(0, 1 - _smoothBass * 5);
+
+  // ── Warm light shafts ───────────────────────────────────────────────────
+  for (let s = 0; s < 3; s++) {
+    const sx = w * (0.25 + s * 0.25) + Math.sin(time * 0.1 + s) * w * 0.05;
+    const al = 0.005 + bass * 0.007;
+    const g  = ctx.createLinearGradient(sx - w * 0.08, 0, sx + w * 0.08, h);
+    g.addColorStop(0,   hsl(38, 40, 50, al * 2));
+    g.addColorStop(0.4, hsl(38, 30, 40, al));
+    g.addColorStop(1,   "rgba(0,0,0,0)");
+    ctx.fillStyle = g;
     ctx.beginPath();
     ctx.moveTo(sx - w * 0.03, 0);
     ctx.lineTo(sx + w * 0.03, 0);
@@ -47,69 +71,101 @@ export function renderLuminousDrift(ctx, w, h, t, bands) {
     ctx.fill();
   }
 
-  // Update each dust mote
+  const cx = w / 2, cy = h / 2;
+  const minDim = Math.min(w, h);
+
   _dustMotes.forEach((d, di) => {
-    // Brownian motion via noise — slow, organic drifting
-    const nSpeed = 0.06 + d.depth * 0.08;
-    const nx = simplex.noise3D(d.noiseOff, time * nSpeed, 0);
-    const ny = simplex.noise3D(0, d.noiseOff, time * nSpeed);
+    // ── Radial geometry ────────────────────────────────────────────────
+    const rx   = d.x - cx,  ry   = d.y - cy;
+    const dist = Math.sqrt(rx * rx + ry * ry) + 0.001;
+    const ux   = rx / dist, uy   = ry / dist;   // unit outward
+    const tx   = -uy,       ty   = ux;           // unit tangential (CCW)
 
-    // Gentle attraction toward center — keeps particles from escaping
-    const dx = d.x - w/2, dy = d.y - h/2;
-    const dist = Math.sqrt(dx*dx + dy*dy) + 1;
-    const centerPull = -0.0004 * (dist / (Math.min(w,h) * 0.3)); // stronger when farther
-    const attractX = dx * centerPull;
-    const attractY = dy * centerPull;
+    // ── Brownian noise drift (gentle — doesn't fight bass physics) ─────
+    const ns  = 0.035 + d.depth * 0.035;
+    const nx  = simplex.noise3D(d.noiseOff,       time * ns, 0) * 0.35;
+    const ny  = simplex.noise3D(0, d.noiseOff,    time * ns)    * 0.35;
 
-    // Audio forces — bass gives gentle radial sway, NOT strong push
-    const bassSwirl = bass * 0.3;
-    const swirlAngle = Math.atan2(dy, dx) + Math.PI/2 + simplex.noise2D(di, time * 0.5) * 1.5;
-    const pushX = Math.cos(swirlAngle) * bassSwirl + Math.sin(time * 0.8 + di * 0.1) * mid * 0.3;
-    const pushY = Math.sin(swirlAngle) * bassSwirl * 0.6 - 0.05 * d.depth; // gentle upward
+    // ── OUTWARD PUSH — bass beat ───────────────────────────────────────
+    // Scales with particle depth (near particles fly farther)
+    const outForce = _beatImpulse * 1.1 * (0.55 + d.depth * 0.9)
+                   * (0.4 + dist / (minDim * 0.4));  // outer particles get bigger kick
 
-    // Velocity with strong damping
-    d.vx += (nx * 0.8 + pushX + attractX) * 0.02;
-    d.vy += (ny * 0.6 + pushY + attractY) * 0.02;
-    d.vx *= 0.97;
-    d.vy *= 0.97;
+    // ── INWARD VACUUM PULL ─────────────────────────────────────────────
+    // Always present; grows with distance (elastic restoring force)
+    // AND with quietness — total silence = maximum suction
+    const vacuumK    = (0.0018 + quietness * 0.006) * (0.6 + d.depth * 0.5);
+    const inForce    = -dist * vacuumK;             // negative = toward center
 
-    d.x += d.vx * (0.5 + d.depth * 0.5);
-    d.y += d.vy * (0.5 + d.depth * 0.5);
+    // Net radial
+    const radial = outForce + inForce;
 
-    // Soft boundary — re-enter from opposite side near center area
-    const m = 30;
-    if (d.x < -m) { d.x = w * 0.3 + Math.random() * w * 0.4; d.vx = 0; }
-    if (d.x > w + m) { d.x = w * 0.3 + Math.random() * w * 0.4; d.vx = 0; }
-    if (d.y < -m) { d.y = h * 0.3 + Math.random() * h * 0.4; d.vy = 0; }
-    if (d.y > h + m) { d.y = h * 0.3 + Math.random() * h * 0.4; d.vy = 0; }
+    // ── ORBITAL WOBBLE — makes return path spiral, not straight ────────
+    // Modulated by noise so each particle has its own wandering curve
+    const orbK = 0.12 + mid * 0.18;
+    const orb  = simplex.noise2D(d.noiseOff * 0.28, time * 0.07) * orbK;
 
-    // Flicker — sparkle based on brilliance & per-particle phase
-    const flicker = 0.4 + Math.sin(time * 1.2 + d.phase) * 0.25 + Math.sin(time * 3.5 + di * 2.3) * 0.15;
-    const audioGlow = overall * 0.35 + brill * 0.25;
+    // ── Integrate forces ───────────────────────────────────────────────
+    d.vx += (ux * radial + tx * orb + nx) * 0.028;
+    d.vy += (uy * radial + ty * orb + ny) * 0.028;
 
-    // Size: depth-dependent + audio reactive
-    const size = d.size * (0.6 + d.depth * 0.8) * (1 + bass * 0.5) * (0.7 + flicker * 0.5);
-    const alpha = d.brightness * (0.08 + audioGlow + flicker * 0.12) * (0.4 + d.depth * 0.6);
+    // Damping: slightly stiffer when vacuuming in (suction feel)
+    const damp = 0.984 - quietness * 0.006;
+    d.vx *= damp;
+    d.vy *= damp;
+
+    d.x += d.vx * (0.45 + d.depth * 0.55);
+    d.y += d.vy * (0.45 + d.depth * 0.55);
+
+    // Soft boundary — prevent escape; bounce back gently
+    const maxR = minDim * 0.62;
+    if (dist > maxR) {
+      d.vx *= 0.6;
+      d.vy *= 0.6;
+      d.x   = cx + ux * maxR * 0.9;
+      d.y   = cy + uy * maxR * 0.9;
+    }
+
+    // ── Rendering ──────────────────────────────────────────────────────
+    const speedSq      = d.vx * d.vx + d.vy * d.vy;
+    const flicker      = 0.5 + Math.sin(time * 1.3 + d.phase) * 0.22
+                             + Math.sin(time * 3.8 + di * 2.4) * 0.12;
+
+    // Glow spikes on outward expansion (beat)
+    const expandGlow   = Math.min(1, speedSq * 30 * _beatImpulse * 0.6);
+    const audioGlow    = overall * 0.28 + brill * 0.22 + expandGlow;
+
+    const size  = d.size * (0.55 + d.depth * 0.85)
+                * (1 + bass * 0.45)
+                * (0.72 + flicker * 0.42);
+    const alpha = d.brightness
+                * (0.06 + audioGlow + flicker * 0.10)
+                * (0.38 + d.depth * 0.62);
 
     if (size < 0.3 || alpha < 0.01) return;
 
-    const hue = d.hue + mid * 12 + simplex.noise2D(di * 0.5, time * 0.15) * 8;
-    const sat = 35 + pres * 20;
-    const light = 55 + brill * 18 + d.depth * 15;
+    // Hue warms on beat (golden flash), cools on vacuum (silvery)
+    const hue   = d.hue
+                + mid * 10
+                + _beatImpulse * 10           // warmer gold on beat
+                - quietness * 8               // cooler/silvery on vacuum
+                + simplex.noise2D(di * 0.5, time * 0.13) * 7;
+    const sat   = 32 + pres * 22 + _beatImpulse * 18;
+    const light = 52 + brill * 16 + d.depth * 15 + expandGlow * 22;
 
     if (size > 2) {
-      const glowR = size * 5;
+      const glowR = size * (4.5 + _beatImpulse * 2.5);
       const gg = ctx.createRadialGradient(d.x, d.y, 0, d.x, d.y, glowR);
-      gg.addColorStop(0, hsl(hue, sat, light, alpha * 0.6));
-      gg.addColorStop(0.3, hsl(hue, sat - 10, light - 10, alpha * 0.2));
-      gg.addColorStop(1, "rgba(0,0,0,0)");
+      gg.addColorStop(0,   hsl(hue, sat,      light,      alpha * 0.75));
+      gg.addColorStop(0.3, hsl(hue, sat - 12, light - 12, alpha * 0.22));
+      gg.addColorStop(1,   "rgba(0,0,0,0)");
       ctx.fillStyle = gg;
-      ctx.beginPath(); ctx.arc(d.x, d.y, glowR, 0, Math.PI*2); ctx.fill();
-      ctx.fillStyle = hsl(hue, sat + 10, light + 15, alpha * 1.2);
-      ctx.beginPath(); ctx.arc(d.x, d.y, size * 0.5, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(d.x, d.y, glowR, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = hsl(hue, sat + 12, light + 18, alpha * 1.35);
+      ctx.beginPath(); ctx.arc(d.x, d.y, size * 0.5, 0, Math.PI * 2); ctx.fill();
     } else {
       ctx.fillStyle = hsl(hue, sat, light, alpha);
-      ctx.beginPath(); ctx.arc(d.x, d.y, size, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(d.x, d.y, size, 0, Math.PI * 2); ctx.fill();
     }
   });
 }
