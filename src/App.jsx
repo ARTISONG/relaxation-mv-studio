@@ -398,16 +398,19 @@ export default function App() {
     }
     const effectiveTotal = mixer ? mixer.totalDuration : totalDur;
     const mimeType = hasAudio ? "video/webm;codecs=vp9,opus" : "video/webm;codecs=vp9";
-    rec=new MediaRecorder(stream,{mimeType,videoBitsPerSecond:30000000});
+    const exportBitrate = (cw >= 3840) ? 80_000_000 : (cw >= 2560) ? 50_000_000 : 30_000_000;
+    rec=new MediaRecorder(stream,{mimeType,videoBitsPerSecond:exportBitrate});
     const chunks=[]; rec.ondataavailable=e=>{if(e.data.size>0)chunks.push(e.data)};
     const done=new Promise(r=>{rec.onstop=r}); rec.start(100);
     const useTrail=TRAIL_MODES.has(motion); resetState();
     const visCanvas=canvasRef.current;
     const visCtx=visCanvas?visCanvas.getContext("2d"):null;
     if(visCanvas){visCanvas.width=cw;visCanvas.height=ch;}
+    const FRAME_MS = 1000 / 30;
     const exportStartTime = Date.now();
     const totalMs = effectiveTotal * 1000;
     let lastProgUpdate = 0;
+    let nextFrameAt = performance.now();
     await new Promise((resolveRender)=>{
       const render=()=>{
         const elapsed = Date.now() - exportStartTime;
@@ -452,9 +455,11 @@ export default function App() {
           lastProgUpdate = elapsed;
           setExportProg(Math.min(100, Math.round((elapsed / totalMs) * 100)));
         }
-        exportTimerRef.current = requestAnimationFrame(render);
+        nextFrameAt += FRAME_MS;
+        const delay = Math.max(0, nextFrameAt - performance.now());
+        exportTimerRef.current = setTimeout(render, delay);
       };
-      exportTimerRef.current = requestAnimationFrame(render);
+      exportTimerRef.current = setTimeout(render, 0);
     });
     await done;
     console.log("Export done. Chunks:", chunks.length, "Total size:", chunks.reduce((s,c)=>s+c.size,0));
