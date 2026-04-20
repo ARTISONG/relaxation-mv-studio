@@ -41,6 +41,9 @@ const MOTIONS = [
   { id:"prismatic_collision", name:"Prismatic Collision", nameTh:"การชนของดวงดาวผลึกแสง", icon:"✦",
     desc:"ดาว 2 ดวงโคจรดึงดูดกันด้วยแรงโน้มถ่วง — Bass กระตุ้นให้ชนกัน เกิดระเบิดแสงประภัสสรเหมือนผลึกแก้ว — คำนวณด้วย Elastic Collision + Thin-Film Interference + N-Body Gravity",
     research:"2-Body Gravitational Problem · Impulse-Based Collision · Chromatic Dispersion", palette:[[0,0,8],[30,80,180],[255,200,80]], trail:false },
+  { id:"snowfall_abyss", name:"Snowfall Abyss", nameTh:"หิมะในความมืดมิด", icon:"❄",
+    desc:"หิมะ 5 ชั้นตาม frequency — Sub-bass ผลึกน้ำแข็งขนาดใหญ่หายใจช้า, Bass เกล็ดหิมะ 6 แฉก, Low-mid วนหมุน, Presence ประกาย, Brilliance ฝุ่นน้ำแข็ง — Beat ผลักพายุหิมะ dB ควบคุมความหนาแน่น — คำนวณด้วย Stokes Drag · Curl Noise Wind · Koch Hexagonal Geometry · Bezier Snow Accumulation",
+    research:"Stokes Drag Law · Simplex Curl Noise · Hexagonal Ice Crystal Geometry · Bezier Accumulation", palette:[[4,8,22],[140,185,225],[218,235,255]], trail:false },
 ];
 
 /* ═══════════════════════════════════════════════════════════
